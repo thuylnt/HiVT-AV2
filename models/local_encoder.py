@@ -32,6 +32,17 @@ from utils import TemporalData
 from utils import init_weights
 
 
+def _rotate_chunks(x: torch.Tensor, rotate_mat: torch.Tensor) -> torch.Tensor:
+    """Rotate each consecutive 2D block of x[..., C] by rotate_mat[..., 2, 2].
+    C must be even. With C=2 -> identical to HiVT's original rotation (backward compatible).
+    With C=4 (variant "add velocity": displacement 2D + velocity 2D) -> rotate both halves by the same agent rotation matrix."""
+    if x.size(-1) == 2:
+        return torch.matmul(x.unsqueeze(-2), rotate_mat).squeeze(-2)
+    chunks = [torch.matmul(x[..., i:i + 2].unsqueeze(-2), rotate_mat).squeeze(-2)
+              for i in range(0, x.size(-1), 2)]
+    return torch.cat(chunks, dim=-1)
+
+
 class LocalEncoder(nn.Module):
 
     def __init__(self,
@@ -61,7 +72,9 @@ class LocalEncoder(nn.Module):
                                                 num_heads=num_heads,
                                                 dropout=dropout,
                                                 num_layers=num_temporal_layers)
-        self.al_encoder = ALEncoder(node_dim=node_dim,
+        # Lane vectors are always 2D -> ALEncoder keeps node_dim=2 even when the actor uses 4 channels
+        # (variant "both": only the actor input of AAEncoder becomes 4 channels, lanes stay the same).
+        self.al_encoder = ALEncoder(node_dim=2,
                                     edge_dim=edge_dim,
                                     embed_dim=embed_dim,
                                     num_heads=num_heads,
@@ -81,7 +94,7 @@ class LocalEncoder(nn.Module):
             batch = Batch.from_data_list(snapshots)
             out = self.aa_encoder(x=batch.x, t=None, edge_index=batch.edge_index, edge_attr=batch.edge_attr,
                                   bos_mask=data['bos_mask'], rotate_mat=data['rotate_mat'])
-            out = out.view(self.historical_steps, out.shape[0] // self.historical_steps, -1)
+            out = out.reshape(self.historical_steps, out.shape[0] // self.historical_steps, -1)
         else:
             out = [None] * self.historical_steps
             for t in range(self.historical_steps):
@@ -147,19 +160,19 @@ class AAEncoder(MessagePassing):
                 size: Size = None) -> torch.Tensor:
         if self.parallel:
             if rotate_mat is None:
-                center_embed = self.center_embed(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1))
+                center_embed = self.center_embed(x.reshape(self.historical_steps, x.shape[0] // self.historical_steps, -1))
             else:
-                center_embed = self.center_embed(
-                    torch.matmul(x.view(self.historical_steps, x.shape[0] // self.historical_steps, -1).unsqueeze(-2),
-                                 rotate_mat.expand(self.historical_steps, *rotate_mat.shape)).squeeze(-2))
+                center_embed = self.center_embed(_rotate_chunks(
+                    x.reshape(self.historical_steps, x.shape[0] // self.historical_steps, -1),
+                    rotate_mat.expand(self.historical_steps, *rotate_mat.shape)))
             center_embed = torch.where(bos_mask.t().unsqueeze(-1),
                                        self.bos_token.unsqueeze(-2),
-                                       center_embed).view(x.shape[0], -1)
+                                       center_embed).reshape(x.shape[0], -1)
         else:
             if rotate_mat is None:
                 center_embed = self.center_embed(x)
             else:
-                center_embed = self.center_embed(torch.bmm(x.unsqueeze(-2), rotate_mat).squeeze(-2))
+                center_embed = self.center_embed(_rotate_chunks(x, rotate_mat))
             center_embed = torch.where(bos_mask.unsqueeze(-1), self.bos_token[t], center_embed)
         center_embed = center_embed + self._mha_block(self.norm1(center_embed), x, edge_index, edge_attr, rotate_mat,
                                                       size)
@@ -182,11 +195,11 @@ class AAEncoder(MessagePassing):
                 center_rotate_mat = rotate_mat.repeat(self.historical_steps, 1, 1)[edge_index[1]]
             else:
                 center_rotate_mat = rotate_mat[edge_index[1]]
-            nbr_embed = self.nbr_embed([torch.bmm(x_j.unsqueeze(-2), center_rotate_mat).squeeze(-2),
+            nbr_embed = self.nbr_embed([_rotate_chunks(x_j, center_rotate_mat),
                                         torch.bmm(edge_attr.unsqueeze(-2), center_rotate_mat).squeeze(-2)])
-        query = self.lin_q(center_embed_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        key = self.lin_k(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        value = self.lin_v(nbr_embed).view(-1, self.num_heads, self.embed_dim // self.num_heads)
+        query = self.lin_q(center_embed_i).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        key = self.lin_k(nbr_embed).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        value = self.lin_v(nbr_embed).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * key).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
@@ -196,7 +209,7 @@ class AAEncoder(MessagePassing):
     def update(self,
                inputs: torch.Tensor,
                center_embed: torch.Tensor) -> torch.Tensor:
-        inputs = inputs.view(-1, self.embed_dim)
+        inputs = inputs.reshape(-1, self.embed_dim)
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(center_embed))
         return inputs + gate * (self.lin_self(center_embed) - inputs)
 
@@ -273,7 +286,8 @@ class TemporalEncoderLayer(nn.Module):
     def forward(self,
                 src: torch.Tensor,
                 src_mask: Optional[torch.Tensor] = None,
-                src_key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                src_key_padding_mask: Optional[torch.Tensor] = None,
+                is_causal: bool = False) -> torch.Tensor:
         x = src
         x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask)
         x = x + self._ff_block(self.norm2(x))
@@ -372,9 +386,9 @@ class ALEncoder(MessagePassing):
                                   [self.is_intersection_embed[is_intersections_j],
                                    self.turn_direction_embed[turn_directions_j],
                                    self.traffic_control_embed[traffic_controls_j]])
-        query = self.lin_q(x_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        key = self.lin_k(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        value = self.lin_v(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
+        query = self.lin_q(x_i).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        key = self.lin_k(x_j).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        value = self.lin_v(x_j).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * key).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
@@ -385,7 +399,7 @@ class ALEncoder(MessagePassing):
                inputs: torch.Tensor,
                x: torch.Tensor) -> torch.Tensor:
         x_actor = x[1]
-        inputs = inputs.view(-1, self.embed_dim)
+        inputs = inputs.reshape(-1, self.embed_dim)
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(x_actor))
         return inputs + gate * (self.lin_self(x_actor) - inputs)
 

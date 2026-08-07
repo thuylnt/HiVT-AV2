@@ -1,0 +1,18 @@
+HiVT-AV2
+Copyright 2026 Le Nghiem Thanh Thuy
+
+This repository is a derivative work produced during an M1 internship at the University of Science and Technology of Hanoi (USTH). It adapts HiVT so that it can train and be evaluated on the Argoverse 2 Motion Forecasting dataset.
+
+It is based on:
+
+  HiVT: Hierarchical Vector Transformer for Multi-Agent Motion Prediction
+  Copyright (c) 2022 Zikang Zhou
+  https://github.com/ZikangZhou/HiVT
+  Licensed under the Apache License, Version 2.0.
+
+The Argoverse 2 actor and lane extraction logic in preprocess_av2.py is adapted from Forecast-MAE (its av2_extractor), with changes to keep the full 2D velocity and to output HiVT's TemporalData graph format instead of a padded dictionary:
+
+  Forecast-MAE (Cheng et al., 2023)
+  https://github.com/jchengai/forecast-mae
+
+Please refer to the Forecast-MAE repository for the license terms covering the adapted portion.

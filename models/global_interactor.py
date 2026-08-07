@@ -73,7 +73,7 @@ class GlobalInteractor(nn.Module):
         for layer in self.global_interactor_layers:
             x = layer(x, edge_index, rel_embed)
         x = self.norm(x)  # [N, D]
-        x = self.multihead_proj(x).view(-1, self.num_modes, self.embed_dim)  # [N, F, D]
+        x = self.multihead_proj(x).reshape(-1, self.num_modes, self.embed_dim)  # [N, F, D]
         x = x.transpose(0, 1)  # [F, N, D]
         return x
 
@@ -125,11 +125,11 @@ class GlobalInteractorLayer(MessagePassing):
                 index: torch.Tensor,
                 ptr: OptTensor,
                 size_i: Optional[int]) -> torch.Tensor:
-        query = self.lin_q_node(x_i).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        key_node = self.lin_k_node(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        key_edge = self.lin_k_edge(edge_attr).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        value_node = self.lin_v_node(x_j).view(-1, self.num_heads, self.embed_dim // self.num_heads)
-        value_edge = self.lin_v_edge(edge_attr).view(-1, self.num_heads, self.embed_dim // self.num_heads)
+        query = self.lin_q_node(x_i).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        key_node = self.lin_k_node(x_j).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        key_edge = self.lin_k_edge(edge_attr).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        value_node = self.lin_v_node(x_j).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
+        value_edge = self.lin_v_edge(edge_attr).reshape(-1, self.num_heads, self.embed_dim // self.num_heads)
         scale = (self.embed_dim // self.num_heads) ** 0.5
         alpha = (query * (key_node + key_edge)).sum(dim=-1) / scale
         alpha = softmax(alpha, index, ptr, size_i)
@@ -139,7 +139,7 @@ class GlobalInteractorLayer(MessagePassing):
     def update(self,
                inputs: torch.Tensor,
                x: torch.Tensor) -> torch.Tensor:
-        inputs = inputs.view(-1, self.embed_dim)
+        inputs = inputs.reshape(-1, self.embed_dim)
         gate = torch.sigmoid(self.lin_ih(inputs) + self.lin_hh(x))
         return inputs + gate * (self.lin_self(x) - inputs)
 

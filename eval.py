@@ -13,11 +13,24 @@
 # limitations under the License.
 from argparse import ArgumentParser
 
+import torch
 import pytorch_lightning as pl
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 
 from datasets import ArgoverseV1Dataset
 from models.hivt import HiVT
+
+# torch>=2.6 defaults torch.load to weights_only=True, which rejects the old PL-1.5 checkpoint (it pickles a ModelCheckpoint callback). 
+# We trust our own checkpoint, so force weights_only=False for all torch.load calls.
+_orig_torch_load = torch.load
+
+
+def _torch_load_full(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_full
 
 if __name__ == '__main__':
     pl.seed_everything(2022)
@@ -32,7 +45,7 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt_path', type=str, required=True)
     args = parser.parse_args()
 
-    trainer = pl.Trainer.from_argparse_args(args)
+    trainer = pl.Trainer(accelerator='gpu', devices=args.gpus)
     model = HiVT.load_from_checkpoint(checkpoint_path=args.ckpt_path, parallel=True)
     val_dataset = ArgoverseV1Dataset(root=args.root, split='val', local_radius=model.hparams.local_radius)
     dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,

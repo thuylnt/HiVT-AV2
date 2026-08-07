@@ -79,9 +79,9 @@ class GRUDecoder(nn.Module):
         if self.uncertain:
             scale = F.elu_(self.scale(out), alpha=1.0) + 1.0 + self.min_scale  # [F x N, H, 2]
             return torch.cat((loc, scale),
-                             dim=-1).view(self.num_modes, -1, self.future_steps, 4), pi  # [F, N, H, 4], [N, F]
+                             dim=-1).reshape(self.num_modes, -1, self.future_steps, 4), pi  # [F, N, H, 4], [N, F]
         else:
-            return loc.view(self.num_modes, -1, self.future_steps, 2), pi  # [F, N, H, 2], [N, F]
+            return loc.reshape(self.num_modes, -1, self.future_steps, 2), pi  # [F, N, H, 2], [N, F]
 
 
 class MLPDecoder(nn.Module):
@@ -132,9 +132,9 @@ class MLPDecoder(nn.Module):
         pi = self.pi(torch.cat((local_embed.expand(self.num_modes, *local_embed.shape),
                                 global_embed), dim=-1)).squeeze(-1).t()
         out = self.aggr_embed(torch.cat((global_embed, local_embed.expand(self.num_modes, *local_embed.shape)), dim=-1))
-        loc = self.loc(out).view(self.num_modes, -1, self.future_steps, 2)  # [F, N, H, 2]
+        loc = self.loc(out).reshape(self.num_modes, -1, self.future_steps, 2)  # [F, N, H, 2]
         if self.uncertain:
-            scale = F.elu_(self.scale(out), alpha=1.0).view(self.num_modes, -1, self.future_steps, 2) + 1.0
+            scale = F.elu_(self.scale(out), alpha=1.0).reshape(self.num_modes, -1, self.future_steps, 2) + 1.0
             scale = scale + self.min_scale  # [F, N, H, 2]
             return torch.cat((loc, scale), dim=-1), pi  # [F, N, H, 4], [N, F]
         else:
